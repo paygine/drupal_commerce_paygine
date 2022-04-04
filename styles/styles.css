@@ -1,0 +1,4 @@
+#edit-commerce-payment .form-type-radio label[for$='commerce-payment-commerce-paygine']:after {
+    background: transparent url(/sites/all/themes/ruprofi/images/visa.jpg) center center no-repeat;
+}
+#edit-commerce-payment-payment-method-commerce-paylercommerce-payment-commerce-payler, label[for="edit-commerce-payment-payment-method-commerce-paylercommerce-payment-commerce-payler"] {display:none!important;}

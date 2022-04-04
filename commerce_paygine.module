@@ -1,0 +1,317 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function commerce_paygine_menu() {
+  $items = array();
+
+  $items['paygine/callback'] = array(
+    'page callback' => 'commerce_paygine_callback',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_commerce_payment_method_info().
+ */
+function commerce_paygine_commerce_payment_method_info() {
+    return array(
+        //Payment method system name
+        'commerce_paygine' => array(
+            //Payment method name shown at admin part of site
+            'title' => t('paygine'),
+            //Payment method name shown at checkout
+            //Optional. Can contain html
+            'display_title' => t('Оплата картой'),
+            //Payment method description. Optinonal.
+            'description' => t('Pay by credit card'),
+            'active' => TRUE,
+            'terminal' => FALSE,
+            'offsite' => TRUE,
+            'offsite_autoredirect' => TRUE,
+        ),
+    );
+}
+
+/**
+ * Payment method callback: settings form.
+ */
+function commerce_paygine_settings_form($settings = NULL) {
+    $form = array();
+    $settings = (array)$settings + array(
+        'sector' => '',
+        'password' => '',
+        'test_mode' => 1,
+        'kkt' => 0,
+        'tax' => '',
+        '2_steps' => 0,
+    );
+ 
+    $form['test_mode'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('Test mode'),
+        '#description' => t('Check to enable test mode'),
+        '#default_value' => $settings['test_mode'],
+    );
+  
+    $form['kkt'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('KKT'),
+        '#description' => t('Check to enable sending fiscal positions'),
+        '#default_value' => $settings['kkt'],
+    );
+  
+    $form['tax'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Код ставки НДС для ККТ'),
+        '#description' => t('1 – ставка НДС 18%<br>
+2 – ставка НДС 10%<br>
+3 – ставка НДС расч. 18/118<br>
+4 – ставка НДС расч. 10/110<br>
+5 – ставка НДС 0%<br>
+6 – НДС не облагается'),
+        '#default_value' => $settings['tax'],
+    );
+  
+    /*$form['2_steps'] = array(
+        '#type' => 'checkbox',
+        '#title' => t('2 steps'),
+        '#description' => t('Check to enable 2-steps payment'),
+        '#default_value' => $settings['2_steps'],
+    );*/
+  
+    $form['sector'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Sector'),
+        '#description' => t('Input sectorID'),
+        '#default_value' => $settings['sector'],
+    );
+    
+    $form['password'] = array(
+        '#type' => 'textfield',
+        '#title' => t('Password'),
+        '#description' => t('Input password'),
+        '#default_value' => $settings['password'],
+    );
+ 
+    return $form;
+}
+
+/**
+ * Payment method callback: payment redirect form.
+ */
+function commerce_paygine_redirect_form($form, &$form_state, $order, $payment_method) {
+	$currency = '643';
+
+    $order_wrapper = entity_metadata_wrapper('commerce_order', $order);
+    $host = ($payment_method['settings']['test_mode'] ? "test" : "pay");
+    $paygine_url = "https://" . $host . ".paygine.net";
+
+    $desc='Заказ '.$order->order_id;
+
+    $amount = $order_wrapper->commerce_order_total->amount->value();
+    $signature = base64_encode(md5($payment_method['settings']['sector'] . intval($amount) . $currency . $payment_method['settings']['password']));
+
+    $fiscalPositions='';
+    $KKT = $payment_method['settings']['kkt'];
+    
+    if ($KKT==1){
+        $TAX = (strlen($payment_method['settings']['tax']) > 0) ?
+            intval($payment_method['settings']['tax']) : 7;
+		// tax free
+		$TAX = 6;
+        if ($TAX > 0 && $TAX < 7){
+			$products = array();
+			foreach (entity_metadata_wrapper('commerce_order', $order)->commerce_line_items as $delta => $line_item_wrapper) {
+				if (in_array($line_item_wrapper->type->value(), commerce_product_line_item_types())) {
+				  $products[] = [
+				  'quantity' => $line_item_wrapper->quantity->value(),
+				  'price' => $line_item_wrapper->commerce_total->value()['amount'] / $line_item_wrapper->quantity->value(),
+				  'title' => commerce_product_load($line_item_wrapper->commerce_product->raw())->title,
+				  'amount' => commerce_product_load($line_item_wrapper->commerce_product->raw())->commerce_price['und'][0]['amount']
+				  ];
+				}
+			}
+			foreach ($products as $product) {
+				$fiscalPositions.= (int)$product['quantity'].';';
+                $fiscalPositions.=$product['price'].';';
+                $fiscalPositions.=$TAX.';';
+                $fiscalPositions.=$product['title'].'|';
+			}
+			
+			$components = $order->commerce_order_total['und'][0]['data']['components'];
+            foreach ($components as $component) {
+				if (is_int(strpos(str_ireplace('|', '_', $component['name']), 'flat_rate_'))) {
+					$component['name'] = 'Доставка';
+				} else continue;
+				
+				$fiscalPositions.= '1;';
+                $elementPrice = $component['price']['amount'];
+                $fiscalPositions.=$elementPrice.';';
+                $fiscalPositions.=$TAX.';';
+                $fiscalPositions.=$component['name'].'|';
+            }
+			
+            $fiscalPositions = substr($fiscalPositions, 0, -1);
+        }
+    }
+    
+
+	$redirect_key = $order->data['payment_redirect_key'];
+	
+	// customer_profile_billing[field_customer_email][und][0][email]
+	$customer_profile = commerce_customer_profile_load($order->commerce_customer_billing['und'][0]['profile_id']);
+	$customer_email = $customer_profile->field_customer_email['und'][0]['email'];
+	$customer_phone = $customer_profile->field_customer_phone['und'][0]['value'];
+	
+    $query = http_build_query(array(
+        'sector' => $payment_method['settings']['sector'],
+        'reference' => $order->order_id,
+        'amount' => intval($amount),
+        'fiscal_positions' => $fiscalPositions,
+        'description' => $desc,
+        'email' => $customer_email,
+        'phone' => $customer_phone,
+        'currency' => $currency,
+        'mode' => 1,
+        'url' => 'https://' . $_SERVER['HTTP_HOST'] . '/paygine/callback/',
+        'signature' => $signature
+    ));
+
+    $context = stream_context_create(array(
+        'http' => array(
+            'header'  => "Content-Type: application/x-www-form-urlencoded\r\n"
+                . "Content-Length: " . strlen($query) . "\r\n",
+            'method'  => 'POST',
+            'content' => $query
+        )
+    ));
+
+    $paygine_order_id = file_get_contents($paygine_url . '/webapi/Register', false, $context);
+
+    if (intval($paygine_order_id) == 0) {
+        // error_log($paygine_order_id);
+
+        //If we are here something goes wrong
+        commerce_payment_redirect_pane_previous_page($order);
+			
+        //Redirect        
+		drupal_goto('checkout/'.$order->order_id.'/payment/back/'.$redirect_key);
+        return "";
+
+    } else {
+        $signature = base64_encode(md5($payment_method['settings']['sector'] . $paygine_order_id . $payment_method['settings']['password']));
+
+        $form['#action'] = "{$paygine_url}/webapi/Purchase?sector={$payment_method['settings']['sector']}&id={$paygine_order_id}&signature={$signature}";
+		$form['#pre_render'][] = 'paygine_form_pre_render';
+        $form['submit'] = array(
+            '#type' => 'submit',
+            '#value' => t('Оплатить')
+        );
+		$form['form_build_id'] = array(
+			'#value' => ''
+		);
+        return $form;
+        // return "{$paygine_url}/webapi/Purchase?sector={$payment_method['settings']['sector']}&id={$paygine_order_id}&signature={$signature}";
+    }
+}
+
+function paygine_form_pre_render($form) {
+  unset($form['form_token']);
+  unset($form['form_build_id']);
+  unset($form['form_id']);
+  unset($form['submit']['#name']);
+  return $form;
+}
+
+function commerce_paygine_callback() {
+	$payment_method = commerce_payment_method_instance_load('commerce_paygine|commerce_payment_commerce_paygine');
+	$paygine_order_id = intval($_GET['id']);
+	$paygine_operation_id = intval($_GET['operation']);
+	$order_id = intval($_GET['reference']);
+	$order = commerce_order_load($order_id);
+	$redirect_key = $order->data['payment_redirect_key'];
+	
+	if (!$paygine_order_id || !$paygine_operation_id || !$order_id || !$order) {
+        // error
+		drupal_goto('checkout/'.$order->order_id.'/payment/back/'.$redirect_key);
+        return "";
+	}
+	
+	// check payment operation state
+	$signature = base64_encode(md5($payment_method['settings']['sector'] . $paygine_order_id . $paygine_operation_id . $payment_method['settings']['password']));
+
+	if (!$payment_method['settings']['test_mode']) {
+		$paygine_url = 'https://pay.paygine.com';
+	} else {
+		$paygine_url = 'https://test.paygine.com';
+	}
+
+	$query = http_build_query(array(
+		'sector' => $payment_method['settings']['sector'],
+		'id' => $paygine_order_id,
+		'operation' => $paygine_operation_id,
+		'signature' => $signature
+	));
+	$context  = stream_context_create(array(
+		'http' => array(
+			'header'  => "Content-Type: application/x-www-form-urlencoded\r\n"
+				. "Content-Length: " . strlen($query) . "\r\n",
+			'method'  => 'POST',
+			'content' => $query
+		)
+	));
+
+	$repeat = 3;
+	while ($repeat) {
+
+		$repeat--;
+		// pause because of possible background processing in the Paygine
+		sleep(2);
+
+		$xml = file_get_contents($paygine_url . '/webapi/Operation', false, $context);
+
+		if (!$xml)
+			break;
+		$xml = simplexml_load_string($xml);
+		if (!$xml)
+			break;
+		$response = json_decode(json_encode($xml));
+		if (!$response)
+			break;
+
+		if (!paygine_orderWasPayed($response))
+			continue;
+
+		// succesfully
+		drupal_goto('checkout/'.$order->order_id.'/payment/return/'.$redirect_key);
+		return '';
+	}
+
+	// error
+	drupal_goto('checkout/'.$order->order_id.'/payment/back/'.$redirect_key);
+}
+
+function paygine_orderWasPayed($response) {
+	$payment_method = commerce_payment_method_instance_load('commerce_paygine|commerce_payment_commerce_paygine');
+	// looking for an order
+	$order_id = intval($response->reference);
+	if ($order_id == 0)
+		return false;
+
+	// check payment state
+	if (($response->type != 'PURCHASE' && $response->type != 'EPAYMENT') || $response->state != 'APPROVED')
+		return false;
+
+	// check server signature
+	$tmp_response = json_decode(json_encode($response), true);
+	unset($tmp_response["signature"]);
+	unset($tmp_response["protocol_message"]);
+
+	$signature = base64_encode(md5(implode('', $tmp_response) . $payment_method['settings']['password']));
+	return $signature === $response->signature;
+}
