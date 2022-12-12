@@ -304,7 +304,7 @@ function paygine_orderWasPayed($response) {
 		return false;
 
 	// check payment state
-	if (($response->type != 'PURCHASE' && $response->type != 'EPAYMENT') || $response->state != 'APPROVED')
+    if (($response->type != 'PURCHASE' && $response->type != 'PURCHASE_BY_QR' && $response->type != 'AUTHORIZE') || $response->state != 'APPROVED')
 		return false;
 
 	// check server signature
